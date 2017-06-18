@@ -1,0 +1,1830 @@
+<?php
+define("PCM_DATA_MASSAGE_PATH", "admin/pcm_data_massage");
+define("PCM_DATA_MASSAGE_AIRING_LAST_UPDATE_ID", "PCM_ALUI");
+define("PCM_DATA_MASSAGE_SHOW_LAST_UPDATE_ID", "PCM_SLUI");
+define("PCM_DATA_MASSAGE_IATS_PAYMENT_PROCESSOR_ID", 13);
+
+/**
+ * Implements hook_menu().
+ */
+function pcm_data_massage_menu() {
+  $items = array();
+  $items[PCM_DATA_MASSAGE_PATH] = 
+    array(
+	  'title' => t("PCM Data Massage"),
+	  'page callback'    => 'pcm_data_massage_page',    
+	  'access arguments' => array('access content'),
+	  'type' => MENU_CALLBACK,
+  );
+
+  $items['admin/pcm_data_massage/download/csv'] = 
+    array(
+	  'title' => t("PCM Data Massage"),
+	  'page callback'    => 'pcm_data_massage_cablecast_show_csv',    
+	  'access arguments' => array('access content'),
+	  'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+function pcm_data_massage_page($function = NULL) {
+  set_time_limit(0);
+  ini_set("memory_limit","5000M");
+  $functions = array(
+		     //"function_tester",
+		     //"status_report",
+		     //"add_project_to_airing",
+		     //"add_view_fields",
+		     //"delete_airing_conflicts",
+		     //"episode_cleanup",
+		     //"add_cmptd_field",
+		     //"runtime_updater",
+		     //"produced_in_portland_updater",
+		     //"show_title_updated",
+		     //"reset_series_request_ranking",
+		     //"set_project_status",
+		     //"current_season_airing_update",
+		     //"airing_deleter",
+		     //"cablecast_delete_cleanup",
+		     //"get_cablecast_shows",
+		     //"show_title_updater",
+         //"civicrm_event_update",
+         //"civicrm_event_template_delete",
+         //"civicrm_priceset_update",
+		     );
+
+  $ret = "";
+  if ($function && in_array($function, $functions)) {
+    $html = call_user_func("pcm_data_massage_".$function);
+    if ($html) {
+      return $html;
+    }
+  }
+  drupal_set_message("Warning, clicking the links below will start the , ".
+		     "processes you should back up the database first .");
+
+  foreach($functions as $function) {
+    $ret .= l($function, PCM_DATA_MASSAGE_PATH."/".$function)."</br>";
+  }
+  return $ret;
+}
+
+/**
+  * Update the is active field for all events
+**/
+function pcm_data_massage_civicrm_event_update() {
+  // perform a 'get' action to load the existing values
+  civicrm_initialize();
+  $result = pcm_data_massage_civicrm_get_events();
+  if (!$result['is_error']) {
+    // prepare for error log file
+    $filename = 'event_update.txt';
+    $filepath = 'public://event_logs';
+    $uri = $filepath . '/' . $filename;
+    if (!file_prepare_directory($filepath, FILE_CREATE_DIRECTORY)) {
+      dpm('Unable to create event log directory');
+    }
+    $datetime = date('d-m-Y \a\t H:i');
+    file_unmanaged_save_data("EVENT LOG - " . 
+          $datetime . "\n", $uri, FILE_EXISTS_REPLACE);
+
+    // Cycle through each value
+    foreach ($result['values'] as $event) {
+      $event['sequential'] = 1;
+      $event['payment_processor'] = PCM_DATA_MASSAGE_IATS_PAYMENT_PROCESSOR_ID;
+      if (!isset($event['title'])) {
+         $event['title'] = 'No Title Assigned';
+      }
+      $event['is_active'] = FALSE;
+      
+dpm($datetime . " - " . $event['id'] ." - " . $event['title'] . " - " . $event['payment_processor'], 'event');
+      
+      try{
+        $new_event = civicrm_api3('Event', 'create', $event);
+      }
+      catch (CiviCRM_API3_Exception $e) {
+        // Handle error here.
+        $errorMessage = $e->getMessage();
+        $errorCode = $e->getErrorCode();
+        $errorData = $e->getExtraParams();
+        $error = "Event ID: " . $event['id'] .": " . $event['title'] ." - " 
+             . $errorCode ." - " . $errorMessage ."\n";
+
+//dpm($error, 'error');             
+        $file_contents = file_get_contents($uri) . $error;        
+        $file = file_unmanaged_save_data($file_contents, $uri, FILE_EXISTS_REPLACE);             
+      }
+      
+/*if (!$new_event['is_error']) {
+  dpm($new_event, 'new_event');
+}*/
+    }
+  }
+  dpm('event update complete');
+}
+
+/**
+ * Get Civi events and return results
+**/
+function pcm_data_massage_civicrm_get_events() {
+  // perform a 'get' action to load the existing values
+  $params = array(
+		  'version' => 3,
+		  'sequential' => 1,
+      'options' => array(
+        'limit' => NULL, // NULL to return all records
+        'sort' => 'id ASC',
+      ),     
+  );
+   
+  try{
+    $result = civicrm_api3('Event', 'get', $params);
+  }
+  catch (CiviCRM_API3_Exception $e) {
+    // Handle error here.
+    $errorMessage = $e->getMessage();
+    $errorCode = $e->getErrorCode();
+    $errorData = $e->getExtraParams();     
+    return array(
+      'error' => $errorMessage,
+      'error_code' => $errorCode,
+      'error_data' => $errorData,
+    );
+  }
+ 
+  return $result;  
+}
+
+/**
+ * Delete event templates
+**/
+function pcm_data_massage_civicrm_event_template_delete() {
+  // delete event
+  
+  civicrm_initialize();
+  $result = pcm_data_massage_civicrm_get_events();
+
+  foreach ($result['values'] as $event) {
+    if($event['is_template'] == 1) {
+      $params = array(
+          'version' => 3,
+          'sequential' => 1,
+          'id' => $event['id'],
+      );
+      
+      $result = civicrm_api3('Event', 'delete', $params);
+      if ($result['is_error']) {
+        dpm('error');
+      }      
+    }
+  } 
+ 
+dpm("deletion of templates complete");
+}
+
+
+/**
+  * Update the is active field for all pricesets
+**/
+function pcm_data_massage_civicrm_priceset_update() {
+  // perform a 'get' action to load the existing values
+  civicrm_initialize();
+  $result = pcm_data_massage_civicrm_get_pricesets();
+  if (!$result['is_error']) {
+    // prepare for error log file
+    $filename = 'priceset_update.txt';
+    $filepath = 'public://event_logs';
+    $uri = $filepath . '/' . $filename;
+    if (!file_prepare_directory($filepath, FILE_CREATE_DIRECTORY)) {
+      dpm('Unable to create event_log directory');
+    }
+    $datetime = date('d-m-Y \a\t H:i');
+    file_unmanaged_save_data("PRICESET LOG - " . 
+          $datetime . "\n", $uri, FILE_EXISTS_REPLACE);
+
+    // Cycle through each value
+    foreach ($result['values'] as $priceset) {
+      $priceset['sequential'] = 1;
+      //$priceset['is_active'] = FALSE;
+      $priceset['title'] = "z_disabled-" . $priceset['title'];
+      
+dpm($datetime . " - " . $priceset['id'], 'priceset');
+      
+      try{
+        $new_priceset = civicrm_api3('PriceSet', 'create', $priceset);
+      }
+      catch (CiviCRM_API3_Exception $e) {
+        // Handle error here.
+        $errorMessage = $e->getMessage();
+        $errorCode = $e->getErrorCode();
+        $errorData = $e->getExtraParams();
+        $error = "priceset ID: " . $priceset['id'] .": " . $priceset['title'] ." - " 
+             . $errorCode ." - " . $errorMessage ."\n";
+
+//dpm($error, 'error');             
+        $file_contents = file_get_contents($uri) . $error;        
+        $file = file_unmanaged_save_data($file_contents, $uri, FILE_EXISTS_REPLACE);             
+      }
+      
+/*if (!$new_priceset['is_error']) {
+  dpm($new_priceset, 'new_priceset');
+}*/
+    }
+  }
+  dpm('priceset update complete');
+}
+
+
+/**
+ * Get Civi price sets and return results
+**/
+function pcm_data_massage_civicrm_get_pricesets() {
+  // perform a 'get' action to load the existing values
+  $params = array(
+		  'version' => 3,
+		  'sequential' => 1,
+      'options' => array(
+        'limit' => NULL, // NULL to return all records
+        'sort' => 'id ASC',
+      ),     
+  );
+   
+  try{
+    $result = civicrm_api3('PriceSet', 'get', $params);
+  }
+  catch (CiviCRM_API3_Exception $e) {
+    // Handle error here.
+    $errorMessage = $e->getMessage();
+    $errorCode = $e->getErrorCode();
+    $errorData = $e->getExtraParams();     
+    return array(
+      'error' => $errorMessage,
+      'error_code' => $errorCode,
+      'error_data' => $errorData,
+    );
+  }
+ 
+  return $result;  
+}
+
+function pcm_data_massage_function_tester() {
+  //does the module exist, if so grab any series slots to be scheduled         
+  $entity = node_load(13406);
+
+  if (module_exists('cm_series_slot')) {
+    $grid_slots = cm_series_slot_get_slots_for_batch($entity->nid);
+  }
+
+  //if we have slots from teh grid schedule them and not field collections      
+  if (isset($grid_slots) && $grid_slots) {
+    cm_series_slot_schedule_series_request($entity, $grid_slots);
+  }
+
+
+
+  /*
+  //put test functionality here, and go to the main pcm_data_massage menu 
+  //page to fire it
+  $source = "_none";
+  $channel = "818";
+  //$channel = "817";
+  $date = "09/14/2015";
+  $date  = date('Y-n-j', strtotime($date));
+  $show = "11951";
+
+
+  $results = cm_show_request_get_start_time_dropdown_values($source,
+							    $channel,
+							    $date,
+							    $show);
+  dsm($results);
+  */
+  /*
+  $node = node_load(2859);
+  node_save($node);
+  dsm($node, 'post node save');
+
+  
+  $source = 20; //Studio A
+  $source = "";
+  $source = 3;
+
+  $channel = 814; //CHANNEL 11
+  $channel = 818; //CHANNEL 11
+  $date = "06/10/2015";
+  $date = "03/10/2015";
+  $date  = date('Y-n-j', strtotime($date));
+  $show = 11517;
+  $values = cm_show_request_get_start_time_dropdown_values($source,
+							   $channel,
+							   $date,
+							   $show);
+  dsm($values, 'my values');
+  foreach( $values as $times) {
+    dsm($times['time']);
+  }
+  */
+}
+function pcm_data_massage_field_swap_test() {
+  
+  $temp_field_name = 'field_airing_temp1_show_ref';
+  $field = field_info_field($temp_field_name);
+  dsm($field, 'does my field exist?');
+  if (!$field) {
+    $temp_field = pcm_rollout_get_temp_field($temp_field_name);
+    field_create_field($temp_field);
+      $field = field_info_field($temp_field_name);
+      dsm($field, 'does my field exist now?');
+  }
+  $field_id = $field['id'];
+  dsm($field_id, 'my id');
+
+  $airing_fields = field_info_instances('airing');
+  $airing_fields = array_pop($airing_fields);
+  
+  $has_instance = FALSE;
+  foreach($airing_fields as $a_name => $a_field) {
+    if ($a_name == $temp_field_name) {
+      $has_instance = TRUE;
+      $an_instance = $a_field;
+      break;
+    }
+  }
+
+  if (!$has_instance) {
+    $instance = pcm_rollout_get_temp_instance($temp_field_name, $field_id);
+    dsm($instance, 'about to create intance');
+    field_create_instance($instance);
+  }
+  else {
+    field_delete_field($temp_field_name);
+    dsm($an_instance, 'has instance');
+  }  
+
+  field_purge_batch();
+}
+function pcm_data_massage_reset_series_request_ranking() {
+  $sql = "SELECT nid from node where type='series_request'";
+  $results = db_query($sql);
+
+  while ($nid = $results->fetchField()) {
+    $series_request = node_load($nid);
+    $priority = cm_series_request_get_initial_priority($series_request);
+    $series_request->field_series_request_priority[LANGUAGE_NONE][]['value'] = 
+	$priority;
+    node_save($series_request);
+
+  }
+}
+function pcm_data_massage_episode_cleanup() {
+  global $pcm_script_airing_conflict_override;
+  $pcm_script_airing_conflict_override = TRUE;
+
+  global $cm_cablecast_skip_confirmation_messages_flag;
+  $cm_cablecast_skip_confirmation_messages_flag = TRUE;
+
+  global $pcm_airing_conflict_surpress_block;
+  $pcm_airing_conflict_surpress_block = TRUE;
+
+  $sql = 
+    "SELECT n.title, n.nid, e.entity_id, e.field_episode_number_value
+     FROM node n
+     LEFT JOIN field_data_field_episode_number e ON n.nid=e.entity_id
+     WHERE n.type='cm_show'
+     ORDER BY n.nid asc
+    ";
+
+  $results = db_query($sql);
+
+  $counter = 0;
+  while ($result = $results->fetchObject()) {
+    $counter++;
+    $show = node_load($result->nid);
+    if ($result->field_episode_number_value) {
+      $show->field_show_is_special[LANGUAGE_NONE][0]['value'] = 0;
+    }
+    else {
+      $show->field_show_is_special[LANGUAGE_NONE][0]['value'] = 1;
+    }
+
+    $old_runtime = 
+      pcm_data_massage_get_single_field_value($show, 'field_runtime', 'value');
+
+    $cc_show_id = 
+      pcm_data_massage_get_single_field_value($show, 'field_cablecast_show_id',
+					      'value');
+
+    $cc_show = $cc_show_id ?
+      cablecast_api_server_query('GetShowInformation',
+				 array('ShowID'=>
+				       $cc_show_id)) : NULL;
+    $cc_show = ($cc_show && isset($cc_show->GetShowInformationResult)) ?
+      $cc_show->GetShowInformationResult : NULL;
+
+    $cc_runtime = $cc_show ? $cc_show->TotalSeconds : 0;
+
+    $new_runtime = $cc_runtime ? $cc_runtime : $old_runtime;
+
+    $show->field_runtime[LANGUAGE_NONE][0]['value'] = $new_runtime;
+
+    $d_project_id = 
+      pcm_data_massage_get_single_field_value($show, 'og_group_ref', 
+					      'target_id');
+    $d_project = $d_project_id ? node_load($d_project_id) : NULL;
+
+    if (!$d_project && $cc_show) {
+      $d_project_id = 
+	db_query("SELECT entity_id 
+                    FROM {field_data_field_cablecast_project_id} 
+                    WHERE field_cablecast_project_id_value = :cc_project_id", 
+		 array(':cc_project_id' => 
+		       $cc_show->ProjectID))->fetchField();      
+      $d_project = $d_project_id ? node_load($d_project_id) : NULL;
+      if ($d_project) {
+	$show->og_group_ref[LANGUAGE_NONE][0]['target_id']  = $d_project_id;
+      }
+    }
+    if (!$d_project) {
+      $d_project_id = 
+	pcm_data_massage_get_orphaned_programming_project_id();
+      $show->og_group_ref[LANGUAGE_NONE][0]['target_id']  = $d_project_id;
+    }
+    try {
+      node_save($show);
+    }
+    catch (Exception $e) {
+      dsm($show);
+      dsm($e->getMessage());
+    }
+  }
+  dsm("Updated $counter shows");
+  print_r("Updated $counter shows");
+    
+}
+
+function pcm_data_massage_get_orphaned_programming_project_id() {
+  //FIXME ADD AS A SETTING FORM ELEMENT
+  $d_project_id = variable_get('pcm_orphaned_programming_project_id');
+
+  $d_project = $d_project_id ? node_load($d_project_id) : NULL;
+
+  if ($d_project) {
+    return $d_project_id;
+  }
+      
+  $project = new stdClass();
+  $project->nid = 0;
+  $project->status = 1;
+  $project->comment = 0;
+  $project->promote= 0;
+  $project->sticky= 0;
+  $project->type='';
+  $project->language=LANGUAGE_NONE;
+  $project->tnid=0;
+  $project->translate=0;
+  $project->uid = 1;
+  $project->type = 'cm_project';
+
+ 
+  $project->title = 'PCM Orphaned Programming Project';
+  $project->field_cm_project_types[LANGUAGE_NONE][0]['tid'] = 759;
+  $project->field_project_status[LANGUAGE_NONE][0]['value'] = 'Active';
+  $project->field_live[LANGUAGE_NONE][0]['value'] = 0;
+  $project->body[LANGUAGE_NONE][0]['value'] = "A project to own all the orphan shows and airings. Ideally these shows and airings have their real parents out there and can be brought home";
+  $project->field_filler[LANGUAGE_NONE][0]['value'] = 0;
+  $project->group_group[LANGUAGE_NONE][0]['value'] = 1;
+  $genres = array(14);
+  $index = 0;
+  foreach ($genres as $tid) {
+    $project->field_pbcore_genres[LANGUAGE_NONE][$index]['tid'] = $tid;
+    $index++;
+  }
+  $languages = array(231);
+  $index = 0;
+  foreach ($languages as $tid) {
+    $project->field_pbcore_languages[LANGUAGE_NONE][$index]['tid'] = $tid;
+    $index++;
+  }
+
+  node_save($project);
+
+  variable_set('pcm_orphaned_programming_project_id', $project->nid);
+
+  return $project->nid;
+}
+function pcm_data_massage_delete_airing_conflicts() {
+  $sql = "SELECT airing_conflict_id FROM cm_airing_conflict";
+  $results = db_query($sql);
+  while ($result = $results->fetchObject()) {
+    entity_delete('airingconflict', $result->airing_conflict_id);
+  }
+}
+
+function pcm_data_massage_add_view_fields() {
+  $fields = 
+    array('node' => 
+	  array(
+		'cm_project' => 
+		array(
+		      'series_requests_all' =>
+		      array(
+			    'postfix'=>'vname',
+			    'value'=>"series_request_viewfields|block",
+			    'args'=>"[node:nid]",
+			    ),
+		      'series_requests_current' =>
+		      array(
+			    'postfix'=>'vname',
+			    'value'=>"series_request_viewfields|block_1",
+			    'args'=>"[node:nid]",
+			    ),
+		      'legacy_series_renewals' =>
+		      array(
+			    'postfix'=>'vname',
+			    'value'=>"project_legacy_renewals|block",
+			    'args'=>"[node:nid]",
+			    ),		      
+		      'project_airings' =>
+		      array(
+			    'postfix'=>'vname',
+			    'value'=>"project_airings|block_1",
+			    'args'=>"[node:nid]",
+			    ),		      
+		      'project_shows' =>
+		      array(
+			    'postfix'=>'vname',
+			    'value'=>"pcm_project_shows|page_2",
+			    'args'=>"[node:nid]",
+			    ),		      
+		      ),
+		'cm_show' => 
+		array(
+		      'show_airings_view' =>
+		      array(
+			    'postfix'=>'vname',
+			    'value'=>'pcm_show_airings|block_1',
+			    'args'=>"[node:nid]",
+			    ),
+		      
+		      )
+		)
+	  );
+
+  foreach($fields as $entity_type=>$bundle_fields) {
+    foreach($bundle_fields as $bundle=>$bundle_fields) {
+      foreach ($bundle_fields as $field_name=>$field_info) {
+	$field_table = "field_data_field_$field_name";
+	$revision_table = "field_revision_field_$field_name";
+	$db_field_name = "field_".$field_name."_".$field_info['postfix'];
+	$arg_field_name = "field_".$field_name."_vargs";
+
+	$sql = "TRUNCATE $field_table";
+	db_query($sql);
+
+	$sql = "TRUNCATE $revision_table";
+	db_query($sql);
+
+	if ($entity_type == 'node') {
+	  $sql = "SELECT nid, vid from node where type='$bundle'";
+	  $results = db_query($sql);
+	}
+	 
+	while ($result = $results->fetchObject()) {
+	  $fields = array(
+			  'entity_type' => $entity_type,
+			  'bundle' => $bundle,
+			  'deleted' => 0,
+			  'entity_id' => $result->nid,
+			  'revision_id' => $result->vid,
+			  'language' => LANGUAGE_NONE,
+			  'delta' => 0,
+			  $db_field_name => $field_info['value'],
+			  $arg_field_name => $result->nid,
+			  );
+	  db_insert($field_table)
+	    ->fields($fields)
+	    ->execute();
+	  db_insert($revision_table)
+	    ->fields($fields)
+	    ->execute();
+	  
+	}
+      }
+    }
+  }
+}
+function pcm_data_massage_add_project_to_airing() {
+  global $pcm_script_airing_conflict_override;
+  $pcm_script_airing_conflict_override = TRUE;
+
+  global $cm_cablecast_skip_confirmation_messages_flag;
+  $cm_cablecast_skip_confirmation_messages_flag = TRUE;
+ 
+  global $pcm_airing_conflict_surpress_block;
+  $pcm_airing_conflict_surpress_block = TRUE;
+
+  $sql = 
+    "SELECT a.airing_id, s.entity_id as show_nid, og.gid as show_project_nid, 
+       p.field_airing_project_ref_target_id as airing_project_nid
+     FROM cm_airing a
+     INNER JOIN  field_data_field_airing_show_ref s
+       ON s.entity_id=a.airing_id
+     INNER JOIN og_membership og 
+       ON (og.entity_type='node' AND 
+           og.etid=s.field_airing_show_ref_target_id)
+     LEFT JOIN field_data_field_airing_project_ref p
+       on a.airing_id=p.entity_id
+     ORDER BY a.airing_id asc;
+   ";
+  $results = db_query($sql);
+  $counter = 0;
+  $update_count = 0;
+  while ($result = $results->fetchObject()) {
+    //variable_set(PCM_DATA_MASSAGE_AIRING_LAST_UPDATE_ID, 
+    //		 $result->airing_id);
+
+
+    $counter ++;
+    if (FALSE && //FOR NOW RESAVE EVERYTHNG
+	$result->airing_project_nid &&	
+	$result->airing_project_nid == $result->show_project_nid) {
+      continue;
+    }
+    else {
+      $update_count ++;
+
+      $airings = entity_load('airing', array($result->airing_id));
+      if ($airings) {
+	$airing = array_shift($airings);
+
+	$airing->field_airing_project_ref[LANGUAGE_NONE][0]['target_id'] =
+	  $result->show_project_nid;
+
+	$start = pcm_data_massage_get_single_field_value($airing, 
+							 'field_airing_date',
+							 'value');
+
+	$cc_airing = cablecast_api_get_airing($airing);
+	
+	$timestamp = $cc_airing ? strtotime($cc_airing->StartTime) : NULL;
+	$end_timestamp = $cc_airing ? strtotime($cc_airing->EndTime) : NULL;
+
+	$original_runtime = $end_timestamp - $timestamp;
+	$original_start = strtotime($start);
+
+	if ($timestamp) {
+	  $timestamp = $timestamp - date('Z', $timestamp);
+	  $airing->field_airing_date[LANGUAGE_NONE][0]['value'] = 
+	    date('Y-m-d H:i:s', $timestamp);
+
+	}
+	else {
+	  $timestamp = strtotime($start);
+	}
+
+	$cc_show = 
+	  $cc_airing ? 
+	  cablecast_api_server_query('GetShowInformation', 
+				     array('ShowID'=>$cc_airing->ShowID)) 
+	  : NULL;
+
+	$cc_show = ($cc_show && isset($cc_show->GetShowInformationResult)) ?
+	  $cc_show->GetShowInformationResult : $cc_show;
+
+	if ($cc_show && isset($cc_show->TotalSeconds)) {
+	  $runtime = $cc_show->TotalSeconds;
+	}
+	else {
+	  $d_show = isset($result->show_nid) ? node_load($result->show_nid) :
+	    NULL;
+	  if ($d_show) {
+	    $runtime = pcm_data_massage_get_single_field_value($d_show, 
+							       'field_runtime',
+							       'value');
+	  }
+	}
+
+	if (!isset($runtime) || !$runtime) {
+	  $runtime = $original_runtime;
+	}
+
+	
+	$airing->field_airing_date[LANGUAGE_NONE][0]['value2'] = 
+	  date('Y-m-d H:i:s', $timestamp + $runtime);
+
+	/**
+	if ($runtime != $original_runtime) {
+	  dsm($airing->airing_id.
+	      " new: ".($runtime/60). ' old: '.($original_runtime/60));
+	
+	}
+	if ($timestamp != $original_start) {
+	  dsm($airing->airing_id."new: ".date('r', $timestamp). ' old: '.
+	      date('r',$original_start));
+	  
+	}
+	*/
+	
+
+	entity_save('airing', $airing);
+      }
+    }
+  }
+  dsm("Processed $counter airings, set projects on $update_count\n");
+  print_r("Processed $counter airings, set projects on $update_count\n");
+}
+
+
+function pcm_data_massage_status_report() {
+  $last_airing_id = variable_get(PCM_DATA_MASSAGE_AIRING_LAST_UPDATE_ID);
+  dsm("Last Airing Processed: $last_airing_id");
+
+  $last_show_id = variable_get(PCM_DATA_MASSAGE_SHOW_LAST_UPDATE_ID);
+  dsm("Last Show Processed: $last_show_id");
+
+}
+
+function pcm_data_massage_add_cmptd_field() {
+  $field_name = 'airing_grid_link';
+  $postfix = 'value';
+
+  $field_table = "field_data_field_$field_name";
+  $revision_table = "field_revision_field_$field_name";
+  $db_field_name = "field_".$field_name."_".$postfix;
+  $entity_type = 'airing';
+  $bundle = 'airing';
+
+  $sql = "TRUNCATE $field_table";
+  db_query($sql);
+  
+  $sql = "TRUNCATE $revision_table";
+  db_query($sql);
+  
+  $sql = "SELECT airing_id FROM cm_airing ORDER by airing_id";
+  
+  $results = db_query($sql);
+	 
+  while ($result = $results->fetchObject()) {
+    //variable_set(PCM_DATA_MASSAGE_AIRING_LAST_UPDATE_ID, 
+    //		 $result->airing_id);
+
+    $value =   
+      l(t("See on Airing Grid"), "admin/manage/scheduling",
+	array('query'=>array('airing_id'=>$result->airing_id)));
+    $fields = array(
+		    'entity_type' => $entity_type,
+		    'bundle' => $bundle,
+		    'deleted' => 0,
+		    'entity_id' => $result->airing_id,
+		    'revision_id' => $result->airing_id,
+		    'language' => LANGUAGE_NONE,
+		    'delta' => 0,
+		    $db_field_name => $value,
+
+		    );
+    db_insert($field_table)
+      ->fields($fields)
+      ->execute();
+    db_insert($revision_table)
+      ->fields($fields)
+      ->execute();
+    
+  }
+}
+
+function pcm_data_massage_runtime_updater() {
+  global $cm_cablecast_skip_confirmation_messages_flag;
+  $cm_cablecast_skip_confirmation_messages_flag = TRUE;
+ 
+  $sql = "
+    SELECT d.entity_id, field_airing_show_ref_target_id,
+      field_airing_date_value2, field_airing_date_value
+    FROM field_data_field_airing_date d
+    LEFT JOIN field_data_field_airing_show_ref s ON s.entity_id=d.entity_id
+    ORDER BY entity_id asc
+    ";
+  $results = db_query($sql);
+  $counter = 0;
+  $update_counter = 0;
+  while($result = $results->fetchObject()) {
+    //    variable_set(PCM_DATA_MASSAGE_AIRING_LAST_UPDATE_ID, 
+    //		 $result->entity_id);
+    $runtime = strtotime($result->field_airing_date_value2) -
+      strtotime($result->field_airing_date_value);
+
+    if ($runtime > (5*60*60)) {
+      $update_counter ++;
+      $runtime = $runtime /(60);
+      if ($runtime > (5*60*60)) {
+	$runtime = 5*60*60;
+      }
+      $new_end = 
+	date('Y-m-d H:i:s', 
+	     strtotime($result->field_airing_date_value) + $runtime);
+      $sql = "
+        UPDATE field_data_field_airing_date
+        SET field_airing_date_value2 = '$new_end'
+        WHERE entity_id=".$result->entity_id."
+      ";
+      db_query($sql);
+      $sql = "
+        UPDATE field_revision_field_airing_date
+        SET field_airing_date_value2 = '$new_end'
+        WHERE entity_id=".$result->entity_id."
+      ";
+      db_query($sql);
+    }
+
+    if (isset($result->field_airing_show_ref_target_id) && 
+	$result->field_airing_show_ref_target_id) {
+      $sql = "
+        UPDATE field_data_field_runtime
+        SET field_runtime_value = $runtime
+        WHERE entity_id=".$result->field_airing_show_ref_target_id."
+      ";
+      db_query($sql);
+      $sql = "
+        UPDATE field_revision_field_runtime
+        SET field_runtime_value = $runtime
+        WHERE entity_id=".$result->field_airing_show_ref_target_id."
+      ";
+      db_query($sql);
+      $counter ++;
+    } 
+  }
+
+  $sql = "
+      UPDATE field_data_field_runtime r
+      LEFT JOIN field_data_field_airing_show_ref s
+      ON s.field_airing_show_ref_target_id=r.entity_id
+      SET r.field_runtime_value = 5*60*60
+      WHERE s.field_airing_show_ref_target_id is NULL
+      AND r.field_runtime_value > 5*60*60
+    ";
+  db_query($sql);
+  $sql = "
+      UPDATE field_revision_field_runtime r
+      LEFT JOIN field_revision_field_airing_show_ref s
+      ON s.field_airing_show_ref_target_id=r.entity_id
+      SET r.field_runtime_value = 5*60*60
+      WHERE s.field_airing_show_ref_target_id is NULL
+      AND r.field_runtime_value > 5*60*60
+    ";
+
+  db_query($sql);
+  dsm("$counter total, $update_counter updated");
+}
+
+function pcm_data_massage_show_title_updated() {
+
+  $sql = "TRUNCATE field_data_field_show_special_title";
+  db_query($sql);
+  
+  $sql = "TRUNCATE field_revision_field_show_special_title";
+  db_query($sql);
+
+  $sql = "
+    SELECT nid, vid, title from node where type='cm_show'
+  ";
+
+  $results = db_query($sql);
+  
+  while ($result = $results->fetchObject()) {
+    $nid = $result->nid;
+    $vid = $result->vid;
+    $title = str_replace("'", "\'",$result->title);
+    
+    if ($title) {
+      $sql = "
+        INSERT INTO field_data_field_show_special_title
+        (entity_type, bundle, deleted, entity_id, revision_id, language,
+         delta, field_show_special_title_value) VALUES
+        ('node', 'cm_show', 0, $nid, $vid, 'und', 0, '$title')
+      ";      
+      db_query($sql);
+
+      $sql = "
+        INSERT INTO field_revision_field_show_special_title
+        (entity_type, bundle, deleted, entity_id, revision_id, language,
+         delta, field_show_special_title_value) VALUES
+        ('node', 'cm_show', 0, $nid, $vid, 'und', 0, '$title')
+      ";      
+
+      db_query($sql);
+    }
+  }
+}
+function pcm_data_massage_produced_in_portland_updater() {
+  $sql = "
+    SELECT legacy.entity_id, legacy.revision_id
+    FROM field_data_field_where_produced legacy
+    WHERE field_where_produced_tid = 761
+    OR field_where_produced_tid = 760
+    ORDER BY entity_id asc
+  ";
+ 
+  $results = db_query($sql);
+  $counter = 0;
+  while($result = $results->fetchObject()) {
+    //    variable_set(PCM_DATA_MASSAGE_SHOW_LAST_UPDATE_ID, 
+    //		 $result->entity_id);
+    $counter ++;
+    $entity_id = $result->entity_id;
+    $revision_id = $result->revision_id;
+    $sql = "
+      SELECT count(1) FROM field_data_field_produced_where 
+      WHERE entity_id = $entity_id
+    ";
+
+    $result = db_query($sql)->fetchField();
+    if (!$result) {
+      $sql = "
+        INSERT INTO field_data_field_produced_where
+        (entity_type, bundle, deleted, entity_id, revision_id, language,
+         delta, field_produced_where_value) VALUES
+        ('node', 'cm_show', 0, $entity_id, $revision_id, 'und', 0, 1)
+      ";
+      db_query($sql);
+
+      $sql = "
+        INSERT INTO field_revision_field_produced_where
+        (entity_type, bundle, deleted, entity_id, revision_id, language,
+         delta, field_produced_where_value) VALUES
+        ('node', 'cm_show', 0, $entity_id, $revision_id, 'und', 0, 1)
+      ";
+
+      db_query($sql);
+
+    }
+  } 
+
+  dsm($counter);
+}
+
+
+function pcm_data_massage_log_query($sql, $args) {
+  $ms = str_replace('{', '', $sql);
+  $ms = str_replace('}', '', $ms);
+  foreach ($args as $i=>$j) {
+    $ms = str_replace($i, $j, $ms);
+  }
+  dsm($ms);
+  dsm($args);
+}
+
+function pcm_data_massage_set_project_status() {
+  $sql = 
+    " SELECT n.nid, g.group_group_value as av, g.entity_id, n.status
+      FROM node n
+      LEFT JOIN field_data_group_group g on g.entity_id=n.nid
+      WHERE n.type = 'cm_project'
+    ";
+
+  $results = db_query($sql);
+  
+  while ($result = $results->fetchObject()) {
+    $project = node_load($result->nid);
+    if(!$result->status) {
+      $project->field_project_status[LANGUAGE_NONE][0]['value'] = 'Withdrawn';
+    }
+    else {
+      $project->field_project_status[LANGUAGE_NONE][0]['value'] = 'Active';
+    }
+    node_save($project);
+  }
+}
+
+
+function pcm_data_massage_cablecast_test_function() {
+
+  $show_nid = 8825;
+  $airing_id = 45199;
+  $project_nid = 9405;
+  $producer_id = 8810;
+
+  //global $cm_cablecast_skip_confirmation_messages_flag;
+  //$cm_cablecast_skip_confirmation_messages_flag = TRUE;
+
+
+  $d_producer = user_load($producer_id);
+  //dsm($d_producer, 'my producer');
+
+  $d_producer->field_cablecast_producer_id = array();
+  $d_producer->mail = 'mark@openflows.com';
+  user_save($d_producer);
+  //dsm($d_producer, 'after save producer');
+
+  $source_project = node_load($project_nid);
+
+  $fields_to_copy =
+    array('status','comment','promote','sticky','type','language',
+	  'tnid','translate','uid', 'group_group', 'body', 'title');
+  
+  foreach($source_project as $field => $value) {
+    if (strpos($field, 'field_') === 0 &&
+	$field != 'field_cablecast_project_id') {
+      $fields_to_copy[] = $field;
+    }
+
+  }
+
+  $d_project = new stdClass();
+
+ 
+  foreach ($fields_to_copy as $field) {
+    $d_project->$field = $source_project->{$field};
+  }
+ 
+
+  //dsm($source_project, 'source');
+  //dsm($d_project, 'about to save project');
+  node_save($d_project);
+
+  //dsm($d_project, 'after save project');
+
+  $cc_project_id = 
+    cm_cablecast_get_single_field_value($d_project, 
+					'field_cablecast_project_id',
+					'value');
+  //dsm($cc_project_id, 'my cablecast project id');
+
+  $cc_project = cablecast_api_get_project($cc_project_id);
+
+  //dsm($cc_project, 'my cablecast project');
+
+  $d_project->title .= " " . date('Y-m-d h:i:s');
+
+  $d_producer = user_load($d_project->uid);
+  //dsm($d_producer, 'd_producer from saved project');
+  
+  $d_producer->mail = 'libkuman'.rand(1,1000).'@openflows.com';
+  user_save($d_producer);
+  //dsm($d_producer, 'producer after save second time');
+
+  $cc_producer_id = 
+    cm_cablecast_get_single_field_value($d_producer, 
+					'field_cablecast_producer_id',
+					'value');
+  //dsm($cc_producer_id, 'final producer id');
+  $cc_producer = cablecast_api_get_producer_object($cc_producer_id);
+  //dsm($cc_producer, 'cablecast producer');
+
+
+  node_save($d_project);
+
+  //dsm($d_project, 'project after second save');
+
+  $cc_project_id  = 
+    cm_cablecast_get_single_field_value($d_project, 
+					'field_cablecast_project_id',
+					'value');
+  //dsm($cc_project_id, 'my cablecast project id again');
+
+  $cc_project = cablecast_api_get_project($cc_project_id);
+
+  //dsm($cc_project, 'my cablecast project again');
+
+  $d_producer = user_load($d_project->uid);
+  //dsm($d_producer, 'producer from 2nd saved project');
+
+
+  $cc_producer_id = 
+    cm_cablecast_get_single_field_value($d_producer, 
+					'field_cablecast_producer_id',
+					'value');
+  //dsm($cc_producer_id, 'final producer id');
+  $cc_producer = cablecast_api_get_producer_object($cc_producer_id);
+  //dsm($cc_producer, 'new cablecast producer');
+
+
+  node_delete($d_project);
+  
+
+
+  /**
+  $show_nid = 8825;
+  $airing_id = 45199;
+
+  $source_show = node_load($show_nid);
+  $d_show = new stdClass();
+  $fields_to_copy =
+    array('status','comment','promote','sticky','type','language',
+	  'tnid','translate','uid','og_group_ref',
+	  'title','field_show_special_title','field_tv_guide_title'
+	  ,'field_short_description','field_show_is_special','field_runtime'
+	  ,'field_produced_where','field_produced_city','field_pcm_facilities'
+	  ,'field_can11','field_pcm_channels','field_objectionable_content'
+	  ,'field_filler', 'field_filler_end_date','field_duplication_release',
+	  'field_technical_requirements','field_special_show_scheduling',
+	  'field_expected_file_format','field_is_placeholder',
+	  'field_pbcore_genres'
+	  );
+  foreach ($fields_to_copy as $field) {
+    $d_show->$field = $source_show->{$field};
+  }
+ 
+  $d_show->title = "Kingdom Culture - Test Episode (title)";
+  $d_show->field_tv_guide_title[LANGUAGE_NONE][0]['value'] = 
+    "Kingdom Culture - Test Episode (TV Guide title)"; 
+
+  $d_show->field_short_description[LANGUAGE_NONE][0]['value'] = 
+    "Kingdom Culture - Test Episode (TV Guide Description)"; 
+
+
+  dsm($source_show, 'source');
+  dsm($d_show, 'about to save');
+  node_save($d_show);
+
+  dsm($d_show, 'after save');
+
+  $cc_show_id  = cm_cablecast_get_single_field_value($d_show, 
+						     'field_cablecast_show_id',
+						     'value');
+  dsm($cc_show_id, 'my cablecast id');
+
+  $cc_show = cablecast_api_server_query('GetShowInformation', 
+					array('ShowID'=>$cc_show_id));
+
+  dsm($cc_show, 'my cablecast show');
+
+  $d_show->title = "Kingdom Culture - Test Episode (title updated)";
+  $d_show->field_tv_guide_title[LANGUAGE_NONE][0]['value'] = 
+    "Kingdom Culture - Test Episode (TV Guide title updated)"; 
+
+  $d_show->field_short_description[LANGUAGE_NONE][0]['value'] = 
+    "Kingdom Culture - Test Episode (TV Guide Description updated)"; 
+
+
+  dsm($d_show, 'before second save');
+
+  node_save($d_show);
+
+  dsm($d_show, 'after second save');
+
+  $cc_show_id  = cm_cablecast_get_single_field_value($d_show, 
+						     'field_cablecast_show_id',
+						     'value');
+  dsm($cc_show_id, 'my cablecast id again');
+
+  $cc_show = cablecast_api_server_query('GetShowInformation', 
+					array('ShowID'=>$cc_show_id));
+
+  dsm($cc_show, 'my cablecast show again');
+
+  node_delete($d_show);
+  */
+  
+
+
+
+
+
+
+  /*
+  $other_airing = entity_load('airing', array(45199));
+  $other_airing = array_pop($other_airing);
+
+  $new_airing = entity_create('airing', array());
+  $arr_fields_to_copy =
+    array('field_airing_date', 'field_airing_channel', 
+	  'field_airing_project_ref', 'field_airing_show_ref');
+  foreach ($arr_fields_to_copy as $field) {
+    $new_airing->$field = $other_airing->{$field};
+  }
+  
+  $new_airing->field_airing_date[LANGUAGE_NONE][0]['value'] = 
+    "2016-04-26 12:00:00";
+  $new_airing->field_airing_date[LANGUAGE_NONE][0]['value2'] = 
+    "2016-04-26 12:58:00";
+  
+
+  entity_save('airing', $new_airing);
+  
+  $cc_airing_id = 
+    cm_cablecast_get_single_field_value($new_airing, 
+					'field_cablecast_airing_id', 'value');
+  
+  
+  if ($cc_airing_id) {
+ 
+    $cc_airing = cablecast_api_get_airing($new_airing);
+  
+    //find tid for cc event channel 
+    $cc_tid = $cc_airing->drupal_channel_tid;
+    
+    $match = _cm_cablecast_is_airing_changed($new_airing, $cc_airing, $cc_tid);
+  }
+
+
+  //update time and resave
+  $new_airing->field_airing_date[LANGUAGE_NONE][0]['value'] = 
+    "2016-04-26 14:00:00";
+  $new_airing->field_airing_date[LANGUAGE_NONE][0]['value2'] = 
+    "2016-04-26 14:58:00";
+
+  $match = _cm_cablecast_is_airing_changed($new_airing, $cc_airing, $cc_tid);
+
+  entity_save('airing', $new_airing);
+  
+  $cc_airing_id = 
+    cm_cablecast_get_single_field_value($new_airing, 
+					'field_cablecast_airing_id', 'value');
+  
+  
+  if ($cc_airing_id) {
+ 
+    $cc_airing = cablecast_api_get_airing($new_airing);
+  
+    //find tid for cc event channel 
+    $cc_tid = $cc_airing->drupal_channel_tid;
+    
+    $match = _cm_cablecast_is_airing_changed($new_airing, $cc_airing, $cc_tid);  
+  }
+
+   
+  entity_delete('airing', $new_airing->airing_id);
+  $cc_airing = cablecast_api_get_airing($new_airing);
+
+  if (!$cc_airing && !$match) {
+    drupal_set_message('success');
+  }
+  else {
+    drupal_set_message('failure');
+  }
+
+  */
+}
+
+function pcm_data_massage_current_season_airing_update() {
+  dsm(date('r'));
+  set_time_limit(0);
+  global $user;
+  $user = user_load(1);
+
+  global $cm_cablecast_skip_confirmation_messages_flag;
+  $cm_cablecast_skip_confirmation_messages_flag = TRUE;
+ 
+  global $pcm_airing_conflict_surpress_block;
+  $pcm_airing_conflict_surpress_block = TRUE;
+
+  $sql = 
+   "SELECT s.entity_id as airing_id,
+    s.field_airing_show_ref_target_id, 
+    p.field_airing_project_ref_target_id,
+    d.field_airing_date_value, l.field_live_value, ls.field_live_source_value,
+    pl.field_is_placeholder_value, t.field_cm_project_types_tid
+
+
+    FROM field_data_field_airing_date d
+    INNER JOIN field_data_field_airing_show_ref s
+    ON s.entity_id=d.entity_id
+    INNER JOIN field_data_field_airing_project_ref p
+    ON p.entity_id=d.entity_id
+    LEFT JOIN field_data_field_is_placeholder pl
+    ON pl.entity_id=s.field_airing_show_ref_target_id 
+    LEFT JOIN field_data_field_cm_project_types t
+    ON t.entity_id=p.field_airing_project_ref_target_id
+    LEFT JOIN field_data_field_live l
+    ON l.entity_id=p.field_airing_project_ref_target_id
+    LEFT JOIN field_data_field_live_source ls
+    ON ls.entity_id=p.field_airing_project_ref_target_id 
+    WHERE d.field_airing_date_value >= '2015-07-01'
+
+    ORDER BY d.field_airing_date_value ASC
+
+
+
+";
+  // AND (p.field_airing_project_ref_target_id = 1294 OR p.field_airing_project_ref_target_id = 6761 or p.field_airing_project_ref_target_id=  2789)
+
+  $results = db_query($sql);
+  $counter = 0;
+  $shows = array();
+  $show_data = array();
+  while($result = $results->fetchObject()) {
+    $show_nid = $result->field_airing_show_ref_target_id;
+    $shows[$show_nid] = isset($shows[$show_nid]) ? $shows[$show_nid] : array();
+    $shows[$show_nid][] = $result->airing_id; 
+    $show_data[$show_nid] = $result;
+    $counter ++;
+  }
+
+  print_r("$counter airings in the current season");
+
+  $counter = 0;
+
+  //SHOW ARRAYS
+  $show_deletes = array();
+  $show_keeps = array();
+
+  //AIRING ARRAYS
+  $new_premiere_live_airings = array();
+  $new_premiere_record_airings = array();
+  $new_tbd_airings = array();
+  $resave_airings = array();
+
+  foreach($shows as $nid=>$show_airings) {
+    $counter ++;
+
+    ////////////////////////////////////////////////////////////////////
+    //DO SHOW CHECKING
+    $result = $show_data[$nid];
+    $result->show_airings = $show_airings;
+      $show = node_load($nid);
+
+      //dsm($result, $show->title);
+
+    //PLACEHOLDER AKA TBD AIRINGS
+    //FIXME TEST BOTH CONDITIONS
+
+    //IF THE SHOW IS A PLACEHOLDER OF IS NOT A SERIES JUST STORE SHOW AND THE
+    //AIRINGS AND CONTINUE
+    if ($result->field_cm_project_types_tid != 1 ||
+	$result->field_is_placeholder_value) {
+      $result->status = "ALREADY PLACE HOLDER OR NOT A SERIES!!!!!!";
+      $show_keeps[$nid] = $result; 
+      $resave_airings = array_merge($resave_airings, $show_airings);
+      continue;
+    }
+
+    //GET THE FIRST AIRING
+    $airings = entity_load('airing', array($show_airings[0]));
+    $premiere_airing = is_array($airings) && $airings ? 
+      array_pop($airings) : NULL;
+    
+    $is_premiere = 
+      pcm_data_massage_get_single_field_value($premiere_airing, 
+					      'field_is_show_premiere_date',
+					      'value');
+   
+    //if airing is marked as premiere we are all good
+    if ($is_premiere) {
+      $show_keeps[$nid] = $result; 
+      $resave_airings = array_merge($resave_airings, $show_airings);
+      continue;
+    }
+
+    //ITS A PREMIRE AIRING OF A SHOW FOR A SERIES PROJECT
+    $premiere_airing->field_is_show_premiere_date[LANGUAGE_NONE][0]['value'] =
+      1;
+
+    //CHECK TO SEE IF THE PREMIEE AIRING IS PART OF A LIVE PROJECT
+    if ($result->field_live_value || $result->field_live_source_value) {
+      $show_keeps[$nid] = $result; 
+      //get project live source, if found set it on airing
+      if ($result->field_live_source_value ) {
+	$premiere_airing->field_live_source[LANGUAGE_NONE][0]['value'] =
+	  $result->field_live_source_value;
+      }
+      //if no live source but project is live, set to unknnown value
+      else if ($result->field_live_value){
+	//set live source on airing to the unknown value
+	$premiere_airing->field_live_source[LANGUAGE_NONE][0]['value'] = 22;
+      }
+
+      //LOG THE PREMIERE AIRING
+      $log = 
+	$result->field_airing_project_ref_target_id."|".
+	$show->title."|".
+	$nid."|".
+	pcm_data_massage_get_single_field_value($premiere_airing, 
+						'field_airing_date',
+						'value').
+	"|live|premiere";
+      print_r($log."\n");
+      
+      array_shift($show_airings);
+      foreach ($show_airings as $repeat_airing_id) {
+	$resave_airings[] = $repeat_airing_id;
+	$premiere_airing->field_subsequent_airings[LANGUAGE_NONE][] =
+	  array('target_id' => $repeat_airing_id);
+
+
+	//LOG THE SUBSEQUENT AIRING, LOAD IT FIRST
+	$airings = entity_load('airing', array($repeat_airing_id));
+	$repeat_airing = is_array($airings) && $airings ? 
+	  array_pop($airings) : NULL;
+
+	$log = 
+	  $result->field_airing_project_ref_target_id."|".
+	  $show->title."|".
+	  $nid."|".
+	  pcm_data_massage_get_single_field_value($repeat_airing, 
+						  'field_airing_date',
+						  'value').
+	  "|live|repeat";
+	print_r($log."\n");
+      }
+      $new_premiere_live_airings[] =  $premiere_airing;
+      continue;
+    }
+    //we are not live but we are a series
+    else {
+      $filename = 
+	pcm_data_massage_get_single_field_value($show, 
+						'field_expected_filename',
+						'value');
+      //IF WE DON'T HAVE A FILE NAME, WE WILL SWAP THE CURRENT SHOW FOR THE 
+      //TBD PLACEHOLDER SHOW
+      if (!$filename) {
+	$premiere_airing->field_airing_show_ref[LANGUAGE_NONE][0]
+	  ['target_id'] = pcm_airing_get_placeholder_show($premiere_airing);
+	$show_deletes[] = $show;
+
+	//LOG THE PREMIERE AIRING THAT WAS SWAPPED
+	$log = 
+	  $result->field_airing_project_ref_target_id."|".
+	  $show->title."|".
+	  $nid."|".
+	  pcm_data_massage_get_single_field_value($premiere_airing, 
+						  'field_airing_date',
+						  'value').
+	  "|record|premiere|SWAPPED!";
+	print_r($log."\n");
+      }
+      else {
+	$show_keeps[$nid] = $show;
+	//LOG THE PREMIERE AIRING THAT WAS NOT SWAPPED
+	$log = 
+	  $result->field_airing_project_ref_target_id."|".
+	  $show->title."|".
+	  $nid."|".
+	  pcm_data_massage_get_single_field_value($premiere_airing, 
+						  'field_airing_date',
+						  'value').
+	  "|record|premiere|".$filename;
+	print_r($log."\n");
+      }
+      
+    
+      //SHIFT OFF THE PREMIERE AIRING SO WE CAN STORE SUBSEQUENT AIRINGS
+      array_shift($show_airings);
+      foreach ($show_airings as $repeat_airing_id) {
+	$premiere_airing->field_subsequent_airings[LANGUAGE_NONE][] =
+	  array('target_id' => $repeat_airing_id);
+
+	$airings = entity_load('airing', array($repeat_airing_id));
+	$repeat_airing = is_array($airings) && $airings ? 
+	  array_pop($airings) : NULL;
+	
+	if (!$filename) {  
+	  $repeat_airing->field_airing_show_ref[LANGUAGE_NONE][0]
+	    ['target_id'] =pcm_airing_get_placeholder_show($premiere_airing);
+	  
+	  $new_tbd_airings[] = $repeat_airing;
+	  
+	  //LOG THE PREMIERE AIRING THAT WAS SWAPPED
+	  $log = 
+	    $result->field_airing_project_ref_target_id."|".
+	    $show->title."|".
+	    $nid."|".
+	    pcm_data_massage_get_single_field_value($repeat_airing, 
+						    'field_airing_date',
+						    'value').
+	    "|record|repeat|SWAPPED!";
+	  print_r($log."\n");
+	}
+	else {
+	  $resave_airings[] = $repeat_airing_id;
+
+	  //LOG THE PREMIERE AIRING THAT WAS SWAPPED
+	  $log = 
+	    $result->field_airing_project_ref_target_id."|".
+	    $show->title."|".
+	    $nid."|".
+	    pcm_data_massage_get_single_field_value($repeat_airing, 
+						    'field_airing_date',
+						    'value').
+	    "|record|repeat|".$filename;
+	  print_r($log."\n");
+	}
+	
+      }
+      $new_premiere_record_airings[] = $premiere_airing; 
+    } 
+  }
+  print_r("$counter shows with airings in current season");
+  dsm(count($show_deletes), 's dels');
+  dsm(count($show_keeps), 's keeps');
+	  
+  //AIRING ARRAYS
+  dsm(count($new_premiere_live_airings), 'new live p');
+  dsm(count($new_premiere_record_airings), 'new rec p');
+  dsm(count($new_tbd_airings), 'new tbds');
+  dsm(count($resave_airings), 'resave');
+  
+  dsm(date('r'));
+
+  dsm('--------------------New Premiere live-----------------------');
+
+  foreach($new_premiere_live_airings as $airing) {
+    //dsm($airing->airing_id);
+    
+    entity_save('airing', $airing);
+    
+  }
+  dsm('-------------------RECORD PREMIERES-----------------------');
+  foreach($new_premiere_record_airings as $airing) {
+    //dsm($airing->airing_id);
+    
+    entity_save('airing', $airing);
+  }
+
+  dsm('-------------------TBD PREMIERES-----------------------');
+  foreach($new_tbd_airings as $airing) {
+    //dsm($airing->airing_id);
+    
+    entity_save('airing', $airing);
+  }
+
+  dsm('-------------------RESAVES-----------------------');
+  foreach($resave_airings as $airing_id) {
+    $airings = entity_load('airing', array($airing_id));
+    $airing = is_array($airings) && $airings ? 
+      array_pop($airings) : NULL;
+    //dsm($airing->airing_id);
+    
+    entity_save('airing', $airing);
+  }
+
+  dsm('-------------------SHOW DELTES-----------------------');
+  foreach($show_deletes as $show) {
+    //dsm($show->nid);
+    node_delete($show->nid);
+  }
+  dsm(date('r'));
+}
+
+
+function pcm_data_massage_get_single_field_value($entity, $field_name, 
+						  $index = 'value') {
+  if (isset($entity->{$field_name})) {
+    $field = $entity->{$field_name};
+    if (isset($field[LANGUAGE_NONE]) && isset($field[LANGUAGE_NONE][0])) {
+      return $field[LANGUAGE_NONE][0][$index];
+    }
+  }
+  return NULL;
+}
+
+function pcm_data_massage_airing_deleter() {
+  $sql = "select airing_id, n.nid , n.title
+          from cm_airing a 
+          INNER JOIN field_data_field_airing_date d on d.entity_id=a.airing_id 
+          inner join field_data_field_airing_show_ref s 
+          on d.entity_id = s.entity_id 
+          inner join node n on n.nid=s.field_airing_show_ref_target_id
+          where field_airing_date_value >= '2015-04-01' 
+          and n.status=0 order by n.nid desc";
+
+  $results = db_query($sql);
+  $counter=0;
+  while ($result = $results->fetchObject()) {
+    $counter ++;
+
+    dsm($result->airing_id . " " .$result->nid ." ".$result->title);
+    entity_delete('airing', $result->airing_id);    
+  }
+
+  print_r("Found $counter airings tied to inactive shows");
+}
+
+function pcm_data_massage_cablecast_delete_cleanup() {
+  $channel_vocab = taxonomy_vocabulary_machine_name_load('Channel');
+  $terms = entity_load('taxonomy_term', FALSE, 
+		       array('vid' => $channel_vocab->vid));
+  $cablecast_airings = array();
+  foreach($terms as $tid=>$term) {    
+    $channel = 
+      pcm_data_massage_get_single_field_value($term, 
+					      'field_cablecast_channel_id', 
+					      'value');
+
+    // setup data array for SOAP call
+    $data = array(
+		  'ChannelID' => $channel,
+		  'FromDate' => date('c', strtotime('2015-03-30')),
+		  'ToDate' => date('c', strtotime('2016-01-01')),
+		  'restrictToShowID' => 0,
+		  );
+
+    $results = cablecast_api_server_query('GetScheduleInformation', $data);
+    if ($results && 
+	isset($results->GetScheduleInformationResult->ScheduleInfo)) {
+      $schedule = $results->GetScheduleInformationResult->ScheduleInfo;
+    }
+    else {
+      continue;
+    }
+
+    if (isset($schedule->ScheduleID)) {
+      $schedule = array($schedule);
+    }
+    
+    foreach($schedule as $cc_airing) {
+      $cablecast_airings[] = $cc_airing->ScheduleID;
+    }
+  }
+
+
+  $sql = 
+   "SELECT d.entity_id as airing_id, c.field_cablecast_airing_id_value
+    FROM field_data_field_airing_date d
+    INNER JOIN field_data_field_cablecast_airing_id c 
+    ON c.entity_id=d.entity_id
+    WHERE d.field_airing_date_value >= '2015-04-01'
+    ORDER BY d.field_airing_date_value ASC
+  ";
+
+  $results = db_query($sql);
+  $good_counter = $bad_counter = 0;
+  while ($result = $results->fetchObject()) {
+    if (in_array($result->field_cablecast_airing_id_value, 
+		 $cablecast_airings)) {
+      $good_counter++;
+    }
+    else {
+      $bad_counter++;
+      entity_delete('airing', $result->airing_id);    
+    }
+  }
+  print_r("we found $good_counter goods and deleted $bad_counter bads");
+
+  
+}
+
+function pcm_data_massage_flop_facilities_field() {
+  $sql = 
+    "UPDATE field_data_field_pcm_facilities
+     SET field_pcm_facilities_value = 999
+     WHERE field_pcm_facilities_value = 1;
+     UPDATE field_data_field_pcm_facilities
+     SET field_pcm_facilities_value = 1
+     WHERE field_pcm_facilities_value = 0;
+     UPDATE field_data_field_pcm_facilities
+     SET field_pcm_facilities_value = 0
+     WHERE field_pcm_facilities_value = 999;
+     UPDATE field_revision_field_pcm_facilities
+     SET field_pcm_facilities_value = 999
+     WHERE field_pcm_facilities_value = 1;
+     UPDATE field_revision_field_pcm_facilities
+     SET field_pcm_facilities_value = 1
+     WHERE field_pcm_facilities_value = 0;
+     UPDATE field_revision_field_pcm_facilities
+     SET field_pcm_facilities_value = 0
+     WHERE field_pcm_facilities_value = 999;";
+
+  db_query($sql);
+
+}
+
+function pcm_data_massage_cablecast_show_csv(){
+  set_time_limit(0);
+
+  header("Content-Type: text/csv");
+  header("Content-Disposition: attachment; filename=pcmshows.csv");
+  // Disable caching
+  header("Cache-Control: no-cache, no-store, must-revalidate"); // HTTP 1.1
+  header("Pragma: no-cache"); // HTTP 1.0
+  header("Expires: 0"); // Proxies
+
+  $output = fopen("php://output", "w");
+
+  fputcsv($output, array("CC ID", "D NID", 'TITLE', 'CG TITLE', 'CATEGORY','CATEGORY ID', 
+			 'EVENT DATE',
+			 'PRODUCER', 'PRODUCER ID', 'PROJECT', 'PROJECT ID', 'RUNTIME',
+			 'TVGUIDE', 'DISTRIBUTION AGREEMENT', 'SHOW TYPE', 'PRODUCTION LOCATION',
+			 'FILLER', 'FILLER END DATE', 'CAN', 'SAFE HARBOR', 'COMMENTS'));
+
+  $shows = pcm_data_massage_get_cablecast_shows();
+
+  foreach($shows as $cc_show){
+    fputcsv($output, $cc_show); // here you can change delimiter/enclosure
+  }
+  fclose($output);
+
+}
+
+function pcm_data_massage_get_cablecast_shows() {
+  $max_show_id = 12000;
+  $counter = 0;
+
+  $shows = array();
+  while ($counter < $max_show_id) {
+    $counter ++;
+
+    $params = array('ShowID'=>$counter);
+
+    //depending on version of cm_cablecast, use one of the two methods
+    //Newest version, post pcm rollout
+    $cc_show = cablecast_api_server_query('GetShowInformation', $params);
+
+    //Oldest version, pre pcm rollout
+    //$cc_show = cm_cablecast_server_query('GetShowInformation', $params);
+
+    $cc_show = ($cc_show && isset($cc_show->GetShowInformationResult)) ?
+      $cc_show->GetShowInformationResult : NULL;
+
+    if ($cc_show) {
+      $d_show_id = 
+	db_query("SELECT entity_id 
+                  FROM {field_data_field_cablecast_show_id} 
+                  WHERE field_cablecast_show_id_value = :cc_show_id", 
+		 array(':cc_show_id'=>$counter))->fetchField();
+      
+      $cc_show->nid = $d_show_id;
+    }
+    else {
+      $d_show_id = "";
+    }
+    if (!$cc_show->Title) {
+      continue;
+    }
+
+    $custom_fields = array();
+    if ($cc_show->CustomFields) {      
+      if (isset($cc_show->CustomFields->CustomField) &&
+	  is_array($cc_show->CustomFields->CustomField)) {
+	foreach($cc_show->CustomFields->CustomField as $field) {
+	  $custom_fields[$field->Name] = $field->Value;
+	}
+      }
+      else if (isset($cc_show->CustomFields->CustomField) &&
+	       isset($cc_show->CustomFields->CustomField->Name)) {
+	$custom_fields[$field->Name] = $field->Value;
+	
+      }
+    }
+
+    $data = array('CC ID' => $cc_show->ShowID,
+		  'D NID' => $d_show_id,
+		  'TITLE' => $cc_show->InternalTitle,
+		  'CG TITLE'  => $cc_show->Title,
+		  'CATEGORY' => $cc_show->Category,
+		  'CATEGORY ID'  => $cc_show->CategoryID, 
+		  'EVENT DATE'  => $cc_show->EventDate,
+		  'PRODUCER' => $cc_show->Producer, 
+		  'PRODUCER ID' => $cc_show->ProducerID, 
+		  'PROJECT' => $cc_show->Project, 
+		  'PROJECT ID' => $cc_show->ProjectID, 
+		  'RUNTIME' => $cc_show->TotalSeconds,
+		  'TVGUIDE' => $custom_fields['TVGuide'], 
+		  'DISTRIBUTION AGREEMENT' => $custom_fields['Distribution Agreement'], 
+		  'SHOW TYPE' => $custom_fields['Show Type'], 
+		  'PRODUCTION LOCATION' => $custom_fields['Production Location'],	 
+		  'FILLER' => $custom_fields['Filler'], 
+		  'FILLER END DATE' => $custom_fields['Filler End Date'], 
+		  'CAN' => $custom_fields['CAN'], 
+		  'SAFE HARBOR' => $custom_fields['Safe Harbor'],
+		  'COMMENTS' => $cc_show->Comments);
+		  
+    $shows[] = $data;
+
+    //dsm($data ,$counter);
+  }
+  return $shows;
+}
+
+function pcm_data_massage_show_title_updater() {
+  $time = strtotime('now') - $start;
+  dsm(date('r', $time));
+
+  global $cm_show_requst_skip_postsave;
+  $cm_show_requst_skip_postsave = TRUE;
+
+  global $cm_cablecast_skip_confirmation_messages_flag;
+  $cm_cablecast_skip_confirmation_messages_flag = TRUE;
+
+  $file_name = "sites/all/modules/custom/pcm_data_massage/pcmshows_prerollout.csv";
+  $file = fopen($file_name, "r");
+  
+  $counter = 0;
+  $headers = $data = fgetcsv($file);
+  while (!feof($file)) {
+    $counter ++;
+    $data = fgetcsv($file);
+    $nid = $data[1];
+
+
+    if ($nid) {
+      $node = node_load($nid);
+      if ($node) {
+	$node->field_tv_guide_title[LANGUAGE_NONE][0]['value'] = $data[3];
+	//$node->field_show_special_title[LANGUAGE_NONE][0]['value'] = $data[2];
+	//$node->title = $data[2];
+	try {
+	  node_save($node);
+	}
+	catch (Exception $e) {
+	  dsm($e, "Exception");
+	  dsm($node, 'bad node '.$nid);
+	  break;
+	}
+      }
+    }
+  }
+  $time = strtotime('now') - $start;
+  //dsm("ending in $time seconds at " . date('H:m:s', strtotime('now')));
+
+  dsm("processed $counter shows");
+}

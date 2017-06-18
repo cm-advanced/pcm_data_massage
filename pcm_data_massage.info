@@ -1,0 +1,7 @@
+name = "Open Signal PCM Data Massage"
+description = "Module with menu hooks and data cleanup functions"
+core = 7.x
+package = Open Signal PCM Community Media Advanced
+version = 7.x-1.0
+project = "pcm_data_massage"
+project_status_url = https://github.com/cm-advanced/pcm_data_massage
